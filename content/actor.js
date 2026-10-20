@@ -78,8 +78,14 @@
     };
   }
 
-  function observeAction(el, before, duration=750) {
+  function pageSignature(doc) {
+    const text = (doc.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    return `${text.length}|${text.slice(0, 120)}|${text.slice(-120)}`;
+  }
+
+  function observeAction(el, before, duration=1400) {
     const doc = el.ownerDocument || document;
+    const beforePage = pageSignature(doc);
     let domChanged = false;
     const observer = new MutationObserver(() => { domChanged = true; });
     try {
@@ -90,7 +96,8 @@
       const after = captureState(el);
       const stateChanged = ['value', 'text', 'checked', 'selectedIndex', 'expanded', 'pressed', 'selected'].some(key => before[key] !== after[key]);
       const urlChanged = before.url !== after.url;
-      resolve({ domChanged, stateChanged, urlChanged, after, verified: domChanged || stateChanged || urlChanged });
+      const pageChanged = beforePage !== pageSignature(doc);
+      resolve({ domChanged, pageChanged, stateChanged, urlChanged, after, verified: stateChanged || urlChanged || (domChanged && pageChanged) });
     }, duration));
   }
 
@@ -293,13 +300,22 @@
 
   async function trySubmitFallback(typedEl) {
     try {
-      // 1. form submit
+      // 1. Use the browser's native form submission algorithm when possible.
       const form = typedEl?.closest?.('form');
       if (form) {
-        const btn = form.querySelector('button[type="submit"], input[type="submit"]');
-        if (btn) { btn.click(); return { ok: true, via: 'form-btn' }; }
-        // don't call form.submit() directly (skips validation) - dispatch submit event
-        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        const btn = form.querySelector('button[type="submit"], button:not([type]), input[type="submit"]');
+        if (btn && !btn.disabled) {
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit(btn);
+            return { ok: true, via: 'form-requestSubmit', element: btn };
+          }
+          btn.click();
+          return { ok: true, via: 'form-btn', element: btn };
+        }
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+          return { ok: true, via: 'form-requestSubmit' };
+        }
       }
       // 2. YouTube specific
       const ytBtn = document.querySelector('#search-icon-legacy, button[aria-label="Search"], button[title="Search"]');

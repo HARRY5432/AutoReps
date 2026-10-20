@@ -2,9 +2,35 @@ const logEl = document.getElementById('log');
 function log(...a){ logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = 1e9; }
 
 async function activeTab(){ const [t]=await chrome.tabs.query({active:true,currentWindow:true}); return t; }
+async function ensureContentScripts(tabId){
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content/perception.js', 'content/actor.js']
+  });
+}
 async function sendToTab(tabId, type, data={}){
   if(!tabId) throw new Error('No target tab');
-  return await chrome.tabs.sendMessage(tabId, {type, ...data});
+  const message = {type, ...data};
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch(firstError) {
+    try {
+      await ensureContentScripts(tabId);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch(secondError) {
+      let tab = null;
+      try { tab = await chrome.tabs.get(tabId); } catch (e) {}
+      const url = tab?.url || '';
+      if (/^(chrome|edge|about|opera):\/\//i.test(url)) {
+        throw new Error('This browser page cannot be controlled. Open a normal website tab.');
+      }
+      if (url.startsWith('file:')) {
+        throw new Error('AutoRep cannot reach this local file. Enable “Allow access to file URLs” in the extension details, then reload the page.');
+      }
+      throw new Error(`Could not connect to the website tab. Reload the page and try again. (${secondError.message || firstError.message})`);
+    }
+  }
 }
 async function sendActive(type, data={}){
   const tab = inspectedTabId ? { id: inspectedTabId } : await activeTab();

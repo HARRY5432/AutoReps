@@ -200,7 +200,7 @@
     if (type === 'file') reasons.push('file-upload-not-supported');
     else if (['button', 'link', 'summary', 'checkbox', 'radio'].includes(role)) capabilities.push('click');
     else if (el.isContentEditable) capabilities.push('type', 'pressEnter');
-    else if (role === 'textbox' && !['file'].includes(type)) capabilities.push('type', 'pressEnter');
+    else if ((tag === 'input' || tag === 'textarea') && !['hidden', 'file'].includes(type)) capabilities.push('type', 'pressEnter');
     else if (role === 'combobox' && tag === 'select' && !el.multiple) capabilities.push('selectOption');
     else if (role === 'combobox' && tag === 'select' && el.multiple) reasons.push('multi-select-not-supported');
     else if (role === 'combobox') reasons.push('custom-combobox-not-supported');
