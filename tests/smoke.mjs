@@ -27,6 +27,8 @@ const perception = read('content/perception.js');
 const provider = read('lib/ai-provider.js');
 const actor = read('content/actor.js');
 const sidepanel = read('sidepanel.js');
+const sidepanelHtml = read('sidepanel.html');
+const background = read('background.js');
 const fixture = read('test-page.html');
 
 assert.match(perception, /autorep\.page-intelligence\.v1/);
@@ -41,19 +43,33 @@ assert.match(perception, /getRegistryEntry/);
 assert.match(provider, /snapshotId/);
 assert.match(provider, /INVENTORY/);
 assert.match(provider, /CONTROLS/);
+assert.match(provider, /action":"click\|type\|select/);
+assert.match(provider, /signal/);
+assert.match(provider, /selectOption/);
 assert.match(provider, /Do not request or expose outerHTML/);
 assert.doesNotMatch(provider, /elements\.map\(e => \(\{ id: e\.id, role: e\.role, name: e\.name, tag: e\.tag \}\)\)\.slice\(0, 80\)/);
 
 assert.match(actor, /STALE_SNAPSHOT/);
 assert.match(actor, /STALE_TARGET/);
 assert.match(actor, /snapshotId/);
+assert.match(actor, /AUTOREP_SELECT/);
+assert.match(actor, /AUTOREP_CANCEL_RUN/);
+assert.match(actor, /contentEditable/);
+assert.match(actor, /dispatchEvent\(new Event\('change'/);
 assert.match(sidepanel, /snapshotId:s\.snapshot\.snapshotId/);
 assert.match(sidepanel, /validatePlan/);
 assert.match(sidepanel, /human review required/);
+assert.match(sidepanel, /sendToTab/);
+assert.match(sidepanel, /AbortController/);
+assert.match(sidepanel, /runId/);
+assert.match(background, /tabId/);
+assert.match(sidepanelHtml, /id="stop"/);
 
 assert.match(fixture, /attachShadow/);
 assert.match(fixture, /type="checkbox"/);
-assert.match(fixture, /<select>/);
+assert.match(fixture, /<select id="choice">/);
+assert.match(fixture, /contenteditable="true"/);
+assert.match(fixture, /disabled>Disabled Option/);
 assert.match(fixture, /<button/);
 
 console.log('AutoRep smoke checks passed');

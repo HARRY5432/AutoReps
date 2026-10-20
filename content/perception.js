@@ -14,6 +14,7 @@
   const HEADING_LIMIT = 20;
   const FORM_LIMIT = 12;
   const TABLE_LIMIT = 8;
+  const OPTION_LIMIT = 40;
   let lastSnapshot = null;
   let badgesVisible = false;
   let currentSnapshotId = null;
@@ -60,7 +61,7 @@
     // priority: aria-label > innerText > value > placeholder > title > alt > id
     const aria = el.getAttribute && el.getAttribute('aria-label');
     if (aria && aria.trim()) return aria.trim().slice(0, 120);
-    let text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    let text = el.tagName === 'SELECT' ? '' : (el.innerText || '').replace(/\s+/g, ' ').trim();
     // for inputs, innerText empty - use surrounding label
     if (!text && el.labels && el.labels.length > 0) {
       text = Array.from(el.labels).map(l => l.innerText).join(' ').trim();
@@ -194,10 +195,11 @@
 
     if (type === 'file') reasons.push('file-upload-not-supported');
     else if (['button', 'link', 'summary', 'checkbox', 'radio'].includes(role)) capabilities.push('click');
+    else if (el.isContentEditable) capabilities.push('type', 'pressEnter');
     else if (role === 'textbox' && !['file'].includes(type)) capabilities.push('type', 'pressEnter');
-    else if (role === 'combobox') reasons.push('selection-not-supported-by-actor');
-    else if (el.isContentEditable) reasons.push('contenteditable-not-supported-by-actor');
-    else if (tag === 'select') reasons.push('selection-not-supported-by-actor');
+    else if (role === 'combobox' && tag === 'select' && !el.multiple) capabilities.push('selectOption');
+    else if (role === 'combobox' && tag === 'select' && el.multiple) reasons.push('multi-select-not-supported');
+    else if (role === 'combobox') reasons.push('custom-combobox-not-supported');
     else if (el.hasAttribute?.('onclick') || el.getAttribute?.('tabindex') !== null) capabilities.push('click');
     else reasons.push('unsupported-control');
 
@@ -212,6 +214,20 @@
     if (['password', 'file'].includes(type)) return null;
     if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return null;
     return normalizeText(el.value, 100);
+  }
+
+  function getOptions(el) {
+    if (el.tagName !== 'SELECT') return { options: [], optionsTruncated: false };
+    const all = Array.from(el.options || []);
+    return {
+      options: all.slice(0, OPTION_LIMIT).map(option => ({
+        label: normalizeText(option.textContent, 120),
+        value: normalizeText(option.value, 120),
+        selected: !!option.selected,
+        disabled: !!option.disabled
+      })),
+      optionsTruncated: all.length > OPTION_LIMIT
+    };
   }
 
   function getHrefInfo(el) {
@@ -238,6 +254,7 @@
     const type = String(el.type || '').toLowerCase();
     const actionable = capabilities.length > 0 && reasons.length === 0;
     const formId = getFormId(el.form || el.closest?.('form'), formIds);
+    const optionInfo = getOptions(el);
     const item = {
       id,
       role,
@@ -246,6 +263,9 @@
       name: getName(el) || '(no name)',
       state,
       value: getSafeValue(el),
+      contentEditable: !!el.isContentEditable,
+      options: optionInfo.options,
+      optionsTruncated: optionInfo.optionsTruncated,
       capabilities,
       actionable,
       actionabilityReasons: reasons,
@@ -626,6 +646,8 @@
 
   // listen for messages from sidepanel
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
+    const handled = ['AUTOREP_SCAN', 'AUTOREP_UNDERSTAND', 'AUTOREP_TOGGLE_BADGES', 'AUTOREP_SAVE'].includes(msg.type);
+    if (!handled) return false;
     if (msg.type === 'AUTOREP_SCAN') sendResponse({ ok: true, snapshot: scanV2() });
     if (msg.type === 'AUTOREP_UNDERSTAND') {
       const snapshot = scanV2();

@@ -64,5 +64,5 @@ AutoRep does **not** send the whole serialized HTML document to the model. Full 
 
 - Chrome/browser integration tests are not automated yet.
 - Provider adapters still use the existing OpenAI-compatible request path.
-- Select, contenteditable, and file-upload actions are inventoried but not yet actor-supported.
-- A later slice will move tab ownership and action policy into a stronger run controller.
+- Native select and contenteditable actions are now supported; file uploads remain intentionally unsupported.
+- A later slice can move more run state into the service worker for persistence across side-panel closes.

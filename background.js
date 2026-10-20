@@ -1,4 +1,4 @@
 chrome.action.onClicked.addListener(async (tab) => {
-  await chrome.sidePanel.open({ windowId: tab.windowId });
+  if (tab.id !== undefined) await chrome.sidePanel.open({ tabId: tab.id });
 });
 chrome.runtime.onInstalled.addListener(() => console.log('[AutoRep] installed'));

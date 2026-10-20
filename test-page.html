@@ -7,7 +7,8 @@
 <p>If our eyes work, Scan should find ~15 elements below with clean names.</p>
 <input placeholder="Search products..." id="s">
 <input type="checkbox" id="c"><label for="c">I agree</label><br>
-<select><option>Option A</option><option>Option B</option></select><br>
+<select id="choice"><option value="a">Option A</option><option value="b">Option B</option><option value="disabled" disabled>Disabled Option</option></select><br>
+<div id="editor" contenteditable="true" aria-label="Notes" style="border:1px solid #aaa;padding:10px;min-height:40px">Editable notes</div>
 <button onclick="document.getElementById('out').innerText='clicked!'">Add to Cart</button>
 <button onclick="this.remove()">Delete me (dynamic test)</button>
 <a href="https://example.com">Next page →</a>

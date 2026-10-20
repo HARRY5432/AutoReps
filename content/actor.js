@@ -1,12 +1,22 @@
-/* AutoRep Actor v0.1 - hands that click/type safely */
+/* AutoRep Actor v0.2 - snapshot-bound, cancellable hands */
 (function () {
   if (window.__autoRepActorLoaded) return;
   window.__autoRepActorLoaded = true;
+  const cancelledRuns = new Set();
 
-  function validateSnapshot(snapshotId) {
+  function runError(runId) {
+    if (runId && cancelledRuns.has(runId)) {
+      return { ok: false, errorCode: 'CANCELLED', error: 'The run was cancelled.' };
+    }
+    return null;
+  }
+
+  function validateSnapshot(snapshotId, runId) {
+    const cancelled = runError(runId);
+    if (cancelled) return cancelled;
     if (!snapshotId) return null;
     const current = window.AutoRepPerception?.getSnapshotId?.();
-    if (current && snapshotId !== current) {
+    if (current !== snapshotId) {
       return {
         ok: false,
         errorCode: 'STALE_SNAPSHOT',
@@ -16,12 +26,17 @@
     return null;
   }
 
-  function getEl(idOrSelector, selectorFallback, snapshotId) {
-    const stale = validateSnapshot(snapshotId);
+  function getEl(idOrSelector, selectorFallback, snapshotId, runId) {
+    const stale = validateSnapshot(snapshotId, runId);
     if (stale) return stale;
     const registryEntry = window.AutoRepPerception?.getRegistryEntry?.(idOrSelector);
-    if (snapshotId && registryEntry && registryEntry.snapshotId === snapshotId && !registryEntry.element?.isConnected) {
-      return { ok: false, errorCode: 'STALE_TARGET', error: 'The target was replaced or removed; scan and plan again.' };
+    if (snapshotId) {
+      if (!registryEntry || registryEntry.snapshotId !== snapshotId) {
+        return { ok: false, errorCode: 'TARGET_NOT_FOUND', error: 'The snapshot does not contain this control.' };
+      }
+      if (!registryEntry.element?.isConnected) {
+        return { ok: false, errorCode: 'STALE_TARGET', error: 'The target was replaced or removed; scan and plan again.' };
+      }
     }
     // try live ref first
     const refs = window.__autoRepRefs || {};
@@ -43,15 +58,15 @@
     return { ok: false, errorCode: 'TARGET_NOT_FOUND', error: 'Element ' + idOrSelector + ' was not found.' };
   }
 
-  function scrollIntoViewSafe(el) {
+  function scrollIntoViewSafe(el, runId) {
     try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {
       el.scrollIntoView();
     }
-    return new Promise(r => setTimeout(r, 450));
+    return new Promise(resolve => setTimeout(() => resolve(runError(runId)), 450));
   }
 
-  async function doClick(id, selector, snapshotId) {
-    const resolved = getEl(id, selector, snapshotId);
+  async function doClick(id, selector, snapshotId, runId) {
+    const resolved = getEl(id, selector, snapshotId, runId);
     if (!resolved.ok) return resolved;
     const el = resolved.element;
     const registryEntry = window.AutoRepPerception?.getRegistryEntry?.(id);
@@ -61,7 +76,10 @@
     if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') {
       return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'The target is disabled.' };
     }
-    await scrollIntoViewSafe(el);
+    const afterScroll = await scrollIntoViewSafe(el, runId);
+    if (afterScroll) return afterScroll;
+    const cancelled = runError(runId);
+    if (cancelled) return cancelled;
     if (!el.isConnected) return { ok: false, errorCode: 'STALE_TARGET', error: 'The target disappeared while scrolling.' };
     el.focus?.();
     // Prefer native activation. Synthetic pointer events are not trusted input
@@ -71,19 +89,55 @@
     return { ok: true, id, tag: el.tagName, name: (el.innerText || el.value || '').slice(0, 80) };
   }
 
-  async function doType(id, text, selector, pressEnter, snapshotId) {
-    const resolved = getEl(id, selector, snapshotId);
+  async function doType(id, text, selector, pressEnter, snapshotId, runId) {
+    const resolved = getEl(id, selector, snapshotId, runId);
     if (!resolved.ok) return resolved;
     const el = resolved.element;
     if (el.disabled || el.readOnly || el.getAttribute?.('aria-disabled') === 'true') {
       return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'The target cannot accept text.' };
     }
     if (!String(text || '').trim()) return { ok: false, errorCode: 'INVALID_ACTION', error: 'Text is required.' };
-    await scrollIntoViewSafe(el);
+    const afterScroll = await scrollIntoViewSafe(el, runId);
+    if (afterScroll) return afterScroll;
+    const cancelled = runError(runId);
+    if (cancelled) return cancelled;
     if (!el.isConnected) return { ok: false, errorCode: 'STALE_TARGET', error: 'The target disappeared while scrolling.' };
     el.focus?.();
     try { el.click?.(); } catch (e) {}
     await new Promise(r => setTimeout(r, 150));
+    const afterFocus = runError(runId);
+    if (afterFocus) return afterFocus;
+
+    if (el.isContentEditable) {
+      const doc = el.ownerDocument || document;
+      const view = doc.defaultView || window;
+      try {
+        const selection = view.getSelection?.();
+        const range = doc.createRange();
+        range.selectNodeContents(el);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const inserted = doc.execCommand?.('insertText', false, String(text));
+        if (!inserted) {
+          el.textContent = String(text);
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(text), inputType: 'insertText' }));
+        }
+      } catch (e) {
+        el.textContent = String(text);
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(text), inputType: 'insertText' }));
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 300));
+      const afterEdit = runError(runId);
+      if (afterEdit) return afterEdit;
+      if (pressEnter !== false) {
+        const enterResult = await doPressEnter(id, selector, snapshotId, runId);
+        if (!enterResult.ok) return enterResult;
+        await new Promise(r => setTimeout(r, 800));
+        await trySubmitFallback(el);
+      }
+      return { ok: true, id, typed: text, contentEditable: true };
+    }
 
     // React-proof clear + set (YouTube, Gmail, React apps need native setter)
     try {
@@ -91,7 +145,7 @@
       const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
       const selAll = () => {
         try { el.focus(); el.select?.(); } catch (e) {}
-        document.execCommand?.('selectAll', false, null);
+        (el.ownerDocument || document).execCommand?.('selectAll', false, null);
       };
       selAll();
       if (setter) setter.call(el, '');
@@ -102,6 +156,8 @@
 
     // human-like typing with proper InputEvent
     for (const ch of String(text)) {
+      const cancelledDuringType = runError(runId);
+      if (cancelledDuringType) return cancelledDuringType;
       try {
         const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -117,7 +173,8 @@
 
     if (pressEnter !== false) {
       // always try enter by default for search boxes
-      await doPressEnter(id, selector, snapshotId);
+      const enterResult = await doPressEnter(id, selector, snapshotId, runId);
+      if (!enterResult.ok) return enterResult;
       await new Promise(r => setTimeout(r, 800));
       // if URL didn't change and we're on YouTube/Google, try clicking search button fallback
       await trySubmitFallback(el);
@@ -125,18 +182,52 @@
     return { ok: true, id, typed: text };
   }
 
-  async function doPressEnter(id, selector, snapshotId) {
-    const resolved = getEl(id, selector, snapshotId);
+  async function doPressEnter(id, selector, snapshotId, runId) {
+    const resolved = getEl(id, selector, snapshotId, runId);
     if (!resolved.ok && snapshotId) return resolved;
     const el = resolved.ok ? resolved.element : document.activeElement;
     if (!el) return resolved;
+    const cancelled = runError(runId);
+    if (cancelled) return cancelled;
+    const ownerDocument = el.ownerDocument || document;
+    const ownerWindow = ownerDocument.defaultView || window;
     const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-    el.dispatchEvent(new KeyboardEvent('keydown', opts));
-    el.dispatchEvent(new KeyboardEvent('keypress', opts));
-    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+    el.dispatchEvent(new ownerWindow.KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new ownerWindow.KeyboardEvent('keypress', opts));
+    el.dispatchEvent(new ownerWindow.KeyboardEvent('keyup', opts));
     // also dispatch on document for framework listeners
-    document.dispatchEvent(new KeyboardEvent('keydown', opts));
+    ownerDocument.dispatchEvent(new ownerWindow.KeyboardEvent('keydown', opts));
     return { ok: true };
+  }
+
+  async function doSelect(id, option, selector, snapshotId, runId) {
+    const resolved = getEl(id, selector, snapshotId, runId);
+    if (!resolved.ok) return resolved;
+    const el = resolved.element;
+    if (el.tagName !== 'SELECT') {
+      return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'Only native select controls support select actions.' };
+    }
+    if (el.multiple) {
+      return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'Multiple-select controls are not supported yet.' };
+    }
+    if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') {
+      return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'The select control is disabled.' };
+    }
+    const requested = String(option ?? '').trim().toLowerCase();
+    const matches = Array.from(el.options || []).filter(candidate => {
+      if (candidate.disabled) return false;
+      return String(candidate.value).trim().toLowerCase() === requested || String(candidate.textContent).trim().toLowerCase() === requested;
+    });
+    if (matches.length === 0) return { ok: false, errorCode: 'INVALID_ACTION', error: 'The requested option is not available.' };
+    if (matches.length > 1) return { ok: false, errorCode: 'INVALID_ACTION', error: 'The requested option is ambiguous.' };
+    const candidate = matches[0];
+    const cancelled = runError(runId);
+    if (cancelled) return cancelled;
+    el.value = candidate.value;
+    Array.from(el.options).forEach(item => { item.selected = item === candidate; });
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, id, value: candidate.value, label: candidate.textContent.trim() };
   }
 
   async function trySubmitFallback(typedEl) {
@@ -183,16 +274,23 @@
   }
 
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
+    const handled = ['AUTOREP_CLICK', 'AUTOREP_TYPE', 'AUTOREP_PRESS_ENTER', 'AUTOREP_SELECT', 'AUTOREP_SCROLL', 'AUTOREP_EXTRACT', 'AUTOREP_CANCEL_RUN'].includes(msg.type);
+    if (!handled) return false;
     (async () => {
-      if (msg.type === 'AUTOREP_CLICK') sendResponse(await doClick(msg.id, msg.selector, msg.snapshotId));
-      else if (msg.type === 'AUTOREP_TYPE') sendResponse(await doType(msg.id, msg.text, msg.selector, msg.pressEnter, msg.snapshotId));
-      else if (msg.type === 'AUTOREP_PRESS_ENTER') sendResponse(await doPressEnter(msg.id, msg.selector, msg.snapshotId));
+      if (msg.type === 'AUTOREP_CLICK') sendResponse(await doClick(msg.id, msg.selector, msg.snapshotId, msg.runId));
+      else if (msg.type === 'AUTOREP_TYPE') sendResponse(await doType(msg.id, msg.text, msg.selector, msg.pressEnter, msg.snapshotId, msg.runId));
+      else if (msg.type === 'AUTOREP_PRESS_ENTER') sendResponse(await doPressEnter(msg.id, msg.selector, msg.snapshotId, msg.runId));
+      else if (msg.type === 'AUTOREP_SELECT') sendResponse(await doSelect(msg.id, msg.option, msg.selector, msg.snapshotId, msg.runId));
+      else if (msg.type === 'AUTOREP_CANCEL_RUN') {
+        if (msg.runId) cancelledRuns.add(msg.runId);
+        sendResponse({ ok: true, runId: msg.runId, cancelled: true });
+      }
       else if (msg.type === 'AUTOREP_SCROLL') sendResponse(doScroll(msg.direction, msg.amount));
       else if (msg.type === 'AUTOREP_EXTRACT') sendResponse(doExtract());
     })();
     return true; // async
   });
 
-  window.AutoRepActor = { doClick, doType, doPressEnter, doScroll, doExtract };
+  window.AutoRepActor = { doClick, doType, doPressEnter, doSelect, doScroll, doExtract };
   console.log('%c[AutoRep] actor loaded - hands ON', 'color:#059669;font-weight:bold');
 })();
