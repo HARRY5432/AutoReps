@@ -3,22 +3,44 @@
   if (window.__autoRepActorLoaded) return;
   window.__autoRepActorLoaded = true;
 
-  function getEl(idOrSelector, selectorFallback) {
+  function validateSnapshot(snapshotId) {
+    if (!snapshotId) return null;
+    const current = window.AutoRepPerception?.getSnapshotId?.();
+    if (current && snapshotId !== current) {
+      return {
+        ok: false,
+        errorCode: 'STALE_SNAPSHOT',
+        error: 'The page changed after the plan was created. Scan and plan again.'
+      };
+    }
+    return null;
+  }
+
+  function getEl(idOrSelector, selectorFallback, snapshotId) {
+    const stale = validateSnapshot(snapshotId);
+    if (stale) return stale;
+    const registryEntry = window.AutoRepPerception?.getRegistryEntry?.(idOrSelector);
+    if (snapshotId && registryEntry && registryEntry.snapshotId === snapshotId && !registryEntry.element?.isConnected) {
+      return { ok: false, errorCode: 'STALE_TARGET', error: 'The target was replaced or removed; scan and plan again.' };
+    }
     // try live ref first
     const refs = window.__autoRepRefs || {};
     if (refs[idOrSelector]) {
-      if (document.contains(refs[idOrSelector])) return refs[idOrSelector];
+      if (refs[idOrSelector].isConnected) return { ok: true, element: refs[idOrSelector] };
     }
     // try perception API
     try {
       const el = window.AutoRepPerception?.getElementById(idOrSelector);
-      if (el && document.contains(el)) return el;
+      if (el && el.isConnected) return { ok: true, element: el };
     } catch (e) {}
     // fallback to selector query
     if (selectorFallback) {
-      try { return document.querySelector(selectorFallback); } catch (e) {}
+      try {
+        const el = document.querySelector(selectorFallback);
+        if (el) return { ok: true, element: el };
+      } catch (e) {}
     }
-    return null;
+    return { ok: false, errorCode: 'TARGET_NOT_FOUND', error: 'Element ' + idOrSelector + ' was not found.' };
   }
 
   function scrollIntoViewSafe(el) {
@@ -28,22 +50,37 @@
     return new Promise(r => setTimeout(r, 450));
   }
 
-  async function doClick(id, selector) {
-    const el = getEl(id, selector);
-    if (!el) return { ok: false, error: 'element ' + id + ' not found, re-scan needed' };
+  async function doClick(id, selector, snapshotId) {
+    const resolved = getEl(id, selector, snapshotId);
+    if (!resolved.ok) return resolved;
+    const el = resolved.element;
+    const registryEntry = window.AutoRepPerception?.getRegistryEntry?.(id);
+    if (snapshotId && registryEntry && registryEntry.snapshotId === snapshotId && registryEntry.element !== el) {
+      return { ok: false, errorCode: 'STALE_TARGET', error: 'The target was replaced; scan and plan again.' };
+    }
+    if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') {
+      return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'The target is disabled.' };
+    }
     await scrollIntoViewSafe(el);
+    if (!el.isConnected) return { ok: false, errorCode: 'STALE_TARGET', error: 'The target disappeared while scrolling.' };
     el.focus?.();
-    // trusted click sequence
-    ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => {
-      el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-    });
+    // Prefer native activation. Synthetic pointer events are not trusted input
+    // and often do not trigger the browser's default behavior.
+    if (typeof el.click === 'function') el.click();
+    else el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     return { ok: true, id, tag: el.tagName, name: (el.innerText || el.value || '').slice(0, 80) };
   }
 
-  async function doType(id, text, selector, pressEnter) {
-    const el = getEl(id, selector);
-    if (!el) return { ok: false, error: 'element ' + id + ' not found' };
+  async function doType(id, text, selector, pressEnter, snapshotId) {
+    const resolved = getEl(id, selector, snapshotId);
+    if (!resolved.ok) return resolved;
+    const el = resolved.element;
+    if (el.disabled || el.readOnly || el.getAttribute?.('aria-disabled') === 'true') {
+      return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'The target cannot accept text.' };
+    }
+    if (!String(text || '').trim()) return { ok: false, errorCode: 'INVALID_ACTION', error: 'Text is required.' };
     await scrollIntoViewSafe(el);
+    if (!el.isConnected) return { ok: false, errorCode: 'STALE_TARGET', error: 'The target disappeared while scrolling.' };
     el.focus?.();
     try { el.click?.(); } catch (e) {}
     await new Promise(r => setTimeout(r, 150));
@@ -80,7 +117,7 @@
 
     if (pressEnter !== false) {
       // always try enter by default for search boxes
-      await doPressEnter(id, selector);
+      await doPressEnter(id, selector, snapshotId);
       await new Promise(r => setTimeout(r, 800));
       // if URL didn't change and we're on YouTube/Google, try clicking search button fallback
       await trySubmitFallback(el);
@@ -88,9 +125,11 @@
     return { ok: true, id, typed: text };
   }
 
-  async function doPressEnter(id, selector) {
-    const el = getEl(id, selector) || document.activeElement;
-    if (!el) return { ok: false };
+  async function doPressEnter(id, selector, snapshotId) {
+    const resolved = getEl(id, selector, snapshotId);
+    if (!resolved.ok && snapshotId) return resolved;
+    const el = resolved.ok ? resolved.element : document.activeElement;
+    if (!el) return resolved;
     const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
     el.dispatchEvent(new KeyboardEvent('keydown', opts));
     el.dispatchEvent(new KeyboardEvent('keypress', opts));
@@ -145,9 +184,9 @@
 
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
     (async () => {
-      if (msg.type === 'AUTOREP_CLICK') sendResponse(await doClick(msg.id, msg.selector));
-      else if (msg.type === 'AUTOREP_TYPE') sendResponse(await doType(msg.id, msg.text, msg.selector, msg.pressEnter));
-      else if (msg.type === 'AUTOREP_PRESS_ENTER') sendResponse(await doPressEnter(msg.id, msg.selector));
+      if (msg.type === 'AUTOREP_CLICK') sendResponse(await doClick(msg.id, msg.selector, msg.snapshotId));
+      else if (msg.type === 'AUTOREP_TYPE') sendResponse(await doType(msg.id, msg.text, msg.selector, msg.pressEnter, msg.snapshotId));
+      else if (msg.type === 'AUTOREP_PRESS_ENTER') sendResponse(await doPressEnter(msg.id, msg.selector, msg.snapshotId));
       else if (msg.type === 'AUTOREP_SCROLL') sendResponse(doScroll(msg.direction, msg.amount));
       else if (msg.type === 'AUTOREP_EXTRACT') sendResponse(doExtract());
     })();

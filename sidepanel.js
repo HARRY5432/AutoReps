@@ -7,6 +7,27 @@ async function send(type, data={}){
   return await chrome.tabs.sendMessage(tab.id, {type, ...data});
 }
 
+function validatePlan(plan, snapshot){
+  const allowed = new Set(['click','type','scroll','extract','done']);
+  if(!plan || !allowed.has(plan.action)) throw new Error('AI returned unsupported action');
+  if(plan.action === 'click' || plan.action === 'type'){
+    if(!Number.isInteger(plan.id)) throw new Error('AI returned an invalid control id');
+    const control = (snapshot.elements || []).find(e => e.id === plan.id);
+    if(!control) throw new Error(`AI selected missing control id ${plan.id}`);
+    const capability = plan.action === 'click' ? 'click' : 'type';
+    if(!control.actionable || !control.capabilities?.includes(capability)){
+      throw new Error(`AI selected non-actionable control ${plan.id}`);
+    }
+    if(plan.action === 'type' && !String(plan.text || '').trim()){
+      throw new Error('AI returned an empty typing action');
+    }
+  }
+  if(plan.action === 'scroll' && !['up','down','top','bottom'].includes(plan.direction || 'down')){
+    throw new Error('AI returned an invalid scroll direction');
+  }
+  return plan;
+}
+
 // load settings
 (async ()=>{
   const c = await chrome.storage.local.get(['provider','apiKey','model','baseURL']);
@@ -33,17 +54,27 @@ document.getElementById('save').onclick = async ()=>{
 document.getElementById('scan').onclick = async ()=>{
   try{
     const r=await send('AUTOREP_SCAN');
-    const pg = r.snapshot.page || {};
-    log(`🧠 SEES: "${r.snapshot.title}"`);
-    log(`🌐 ${pg.domain||''}${pg.urlPath||''}${pg.urlQuery||''} (hint=${pg.pageHint||'?'})`);
-    log(`📋 ${pg.summary||''}`);
-    if(pg.loneInputs?.length) log(` 🔍 searches: ${pg.loneInputs.join(', ')}`);
+    const snapshot = r.snapshot;
+    const pg = snapshot.page || {};
+    const inv = snapshot.inventory || {};
+    const site = pg.site || {};
+    log(`🧠 SEES: "${snapshot.title}"`);
+    log(`🌐 ${site.hostname || pg.domain || ''}${pg.urlPath || ''}${pg.urlQuery || ''}`);
+    log(`🆔 snapshot ${snapshot.snapshotId || '?'} • hint=${pg.pageHint || '?'}`);
+    log(`📋 ${pg.summary || ''}`);
+    log(`🧩 controls ${inv.returnedCount ?? snapshot.count}/${inv.candidateCount ?? snapshot.count}` + (inv.truncated ? ` • truncated (${inv.omitted?.overLimit || 0} omitted)` : ' • complete'));
+    log(`✅ actionable ${inv.actionableCount ?? pg.counts?.actionableControls ?? '?'} • domain ${site.hostname || '?'}`);
+    if(pg.loneInputs?.length) log(` 🔍 inputs: ${pg.loneInputs.join(', ')}`);
     if(pg.prices?.length) log(` 💰 prices: ${pg.prices.slice(0,3).join(', ')}`);
     if(pg.videos?.length) log(` 🎬 videos: ${pg.videos.slice(0,2).join(' | ').slice(0,120)}`);
     if(pg.products?.length) log(` 🛍 products: ${pg.products.slice(0,2).join(' | ').slice(0,120)}`);
-    log(`👁 ${r.snapshot.count} clickable:`);
-    r.snapshot.elements.slice(0,20).forEach(e=>log(` [${e.id}] ${e.role} "${e.name}"`));
-    if(r.snapshot.count>20) log(`... +${r.snapshot.count-20} more`);
+    log(`👁 controls:`);
+    snapshot.elements.slice(0,30).forEach(e=>{
+      const state = e.state?.disabled ? 'disabled' : e.actionable ? 'ready' : 'inspect-only';
+      const caps = e.capabilities?.length ? ` <${e.capabilities.join(',')}>` : '';
+      log(` [${e.id}] ${e.role} "${e.name}" — ${state}${caps}`);
+    });
+    if(snapshot.count>30) log(`... +${snapshot.count-30} more`);
   }catch(e){log('❌ scan failed, reload page:',e.message)}
 };
 let badgesOn=false;
@@ -60,21 +91,25 @@ document.getElementById('run').onclick = async ()=>{
   if(!task) return log('write task first');
   log('🚀 task:',task);
   try{
-    let lastUrl = (await send('AUTOREP_SCAN')).snapshot.url;
     for(let step=0; step<12; step++){
       const s=await send('AUTOREP_SCAN');
       const pg = s.snapshot.page||{};
-      log(`-- step ${step+1} [${pg.pageType||'?'}] ${s.snapshot.url.slice(0,60)} (${s.snapshot.count} els)`);
+      log(`-- step ${step+1} [${pg.site?.hostname || pg.domain || '?'}${pg.urlPath || ''}] ${s.snapshot.url.slice(0,60)} (${s.snapshot.count} controls)`);
+      if(pg.needsHuman){
+        log('⛔ human review required before acting on this page (auth, payment, OTP, CAPTCHA, or sensitive flow detected)');
+        break;
+      }
       const plan=await AutoRepAI.plan(task, s.snapshot);
+      validatePlan(plan, s.snapshot);
       log('🧠 AI:', JSON.stringify(plan));
       if(plan.action==='done'){ log('✅ DONE:', plan.reason||''); break; }
       if(plan.action==='click'){
-        const r=await send('AUTOREP_CLICK',{id:plan.id});
+        const r=await send('AUTOREP_CLICK',{id:plan.id, snapshotId:s.snapshot.snapshotId});
         log(r.ok?' ✓ clicked':' ❌ click fail '+r.error);
       }
       else if(plan.action==='type'){
         const beforeUrl = s.snapshot.url;
-        const r=await send('AUTOREP_TYPE',{id:plan.id, text:plan.text||'', pressEnter:true});
+        const r=await send('AUTOREP_TYPE',{id:plan.id, text:plan.text||'', pressEnter:true, snapshotId:s.snapshot.snapshotId});
         log(r.ok?` ✓ typed "${plan.text}" + Enter + SearchBtn`:' ❌ type fail');
         await new Promise(r=>setTimeout(r,2500));
         // verify navigation / results loaded - whole-page check
@@ -82,9 +117,7 @@ document.getElementById('run').onclick = async ()=>{
           const after=await send('AUTOREP_SCAN');
           if(after.snapshot.url!==beforeUrl) log(' ✓ page changed → '+after.snapshot.url.slice(0,80));
           else {
-            log(' ⚠ same page, retrying Enter + Search click...');
-            await send('AUTOREP_PRESS_ENTER',{id:plan.id});
-            await new Promise(r=>setTimeout(r,1500));
+            log(' ⚠ same page; next loop will rescan and re-plan instead of reusing an old control id');
           }
           continue; // skip extra wait at bottom, already waited
         }catch(e){}

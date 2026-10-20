@@ -1,31 +1,59 @@
-/* AutoRep Perception Engine v0.1 - TOP NOTCH
- * Why this beats raw outerHTML:
- * raw HTML = 500KB-2MB garbage, LLM chokes.
- * This = 50-150 interactive elements only, with stable ai-ids.
- * Handles: Shadow DOM, same-origin iframes, React re-renders, lazy-load, infinite scroll.
+/* AutoRep Perception Engine v0.2 - structured page intelligence
+ * We do not send literal outerHTML to the model. Instead we produce bounded,
+ * structured facts: site identity, page structure, content signals, and an
+ * actionable control inventory. Numeric ids are scoped to one snapshot.
  */
 (function () {
   if (window.__autoRepPerceptionLoaded) return;
   window.__autoRepPerceptionLoaded = true;
 
   const BADGE_CONTAINER_ID = '__autorep-badges';
+  const SNAPSHOT_SCHEMA = 'autorep.page-intelligence.v1';
+  const CONTROL_LIMIT = 250;
+  const TEXT_PREVIEW_LIMIT = 3500;
+  const HEADING_LIMIT = 20;
+  const FORM_LIMIT = 12;
+  const TABLE_LIMIT = 8;
   let lastSnapshot = null;
   let badgesVisible = false;
-  let idCounter = 0;
-  const elementToId = new WeakMap();
-  const idToElement = new Map();
+  let currentSnapshotId = null;
+  const snapshotRegistry = new Map();
 
   const JUNK_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK', 'SVG', 'PATH', 'SOURCE']);
-  const KEEP_TAGS = new Set(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'OPTION']);
+  const KEEP_TAGS = new Set(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY']);
+
+  function makeSnapshotId() {
+    try {
+      if (crypto.randomUUID) return 's_' + crypto.randomUUID();
+    } catch (e) {}
+    return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+  }
+
+  function normalizeText(value, limit = 160) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  }
+
+  function hasHiddenAncestor(el) {
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true' || current.inert) return true;
+      current = current.parentElement || current.getRootNode?.().host || null;
+    }
+    return false;
+  }
 
   function isVisible(el) {
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-    if (el.hasAttribute('hidden')) return false;
-    // off-screen far away still keep if scrollable page (for scroll action), but deprioritize
-    return true;
+    try {
+      if (hasHiddenAncestor(el)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      const style = (el.ownerDocument?.defaultView || window).getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none') return false;
+      // off-screen far away still keep if scrollable page (for scroll action), but deprioritize
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   function getName(el) {
@@ -50,7 +78,9 @@
     if (tag === 'a') return 'link';
     if (tag === 'input') {
       const t = (el.type || 'text').toLowerCase();
-      if (['checkbox', 'radio', 'submit', 'button'].includes(t)) return 'button';
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      if (['submit', 'button', 'reset', 'file'].includes(t)) return 'button';
       return 'textbox';
     }
     if (tag === 'select') return 'combobox';
@@ -101,6 +131,7 @@
     if (!el.tagName) return false;
     const tag = el.tagName.toUpperCase();
     if (JUNK_TAGS.has(tag)) return false;
+    if (el.closest?.('#' + BADGE_CONTAINER_ID)) return false;
     if (KEEP_TAGS.has(tag)) return true;
     if (el.isContentEditable) return true;
     if (el.hasAttribute) {
@@ -111,266 +142,407 @@
     return false;
   }
 
-  // Recursive walker that pierces Shadow DOM
-  function* walk(root) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
+  // Recursive walker that records whether a control came from open Shadow DOM.
+  function* walk(root, meta = {}) {
+    const ownerDocument = root.ownerDocument || document;
+    const walker = ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
     let node = walker.currentNode;
-    // include root itself
-    if (node && node.tagName) yield node;
+    if (node && node.tagName) yield { el: node, ...meta };
     while ((node = walker.nextNode())) {
-      yield node;
+      yield { el: node, ...meta };
       if (node.shadowRoot) {
-        yield* walk(node.shadowRoot);
+        yield* walk(node.shadowRoot, { ...meta, inShadowRoot: true });
       }
     }
   }
 
-  function scan() {
-    idCounter = 0;
-    idToElement.clear();
-    // keep WeakMap across scans for stability? reset ids each scan for simplicity but selector stable
-    const elements = [];
-    const seen = new Set();
+  function getFormId(form, formIds) {
+    if (!form) return null;
+    if (!formIds.has(form)) formIds.set(form, 'form-' + (formIds.size + 1));
+    return formIds.get(form);
+  }
 
-    const roots = [document.body || document.documentElement];
-    // same-origin iframes
-    document.querySelectorAll('iframe').forEach(frame => {
-      try {
-        if (frame.contentDocument && frame.contentDocument.body) roots.push(frame.contentDocument.body);
-      } catch (e) { /* cross-origin - skip, will need vision later */ }
-    });
-
-    for (const root of roots) {
-      for (const el of walk(root)) {
-        if (!isInteractive(el)) continue;
-        if (!isVisible(el)) continue;
-        if (seen.has(el)) continue;
-        seen.add(el);
-
-        const rect = el.getBoundingClientRect();
-        const inViewport = rect.top >= -200 && rect.top <= window.innerHeight + 800;
-
-        let aiId;
-        if (elementToId.has(el)) {
-          aiId = elementToId.get(el);
-        } else {
-          aiId = ++idCounter + (idCounter > 900 ? 0 : 0); // simple increment
-          // ensure unique across roots
-          aiId = elements.length + 1;
-          elementToId.set(el, aiId);
-        }
-        idToElement.set(aiId, el);
-
-        elements.push({
-          id: aiId,
-          role: getRole(el),
-          name: getName(el) || '(no name)',
-          tag: el.tagName.toLowerCase(),
-          type: el.type || '',
-          value: (el.value || '').slice(0, 100),
-          checked: el.checked || false,
-          disabled: el.disabled || false,
-          selector: buildSelector(el),
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          inViewport
-        });
-
-        if (elements.length >= 200) break;
-      }
-      if (elements.length >= 200) break;
-    }
-
-    // sort: viewport first, then buttons/links/inputs priority
-    elements.sort((a, b) => {
-      if (a.inViewport !== b.inViewport) return a.inViewport ? -1 : 1;
-      return a.id - b.id;
-    });
-
-    // re-assign clean 1..N after sort and rebuild map
-    const finalEls = elements.slice(0, 150).map((e, idx) => ({ ...e, id: idx + 1 }));
-    idToElement.clear();
-    finalEls.forEach(e => {
-      // find original el by selector? easier: keep ref via old id lookup
-      // we stored in order, so map via elements[idx]
-    });
-    // rebuild idToElement correctly
-    elements.slice(0, 150).forEach((orig, idx) => {
-      const oldEl = idToElement.get(orig.id) || null;
-    });
-    // Simpler: second pass - walk again? Instead store el ref directly:
-    // Re-do with el refs preserved:
-    const withRefs = elements.slice(0, 150);
-    idToElement.clear();
-    const out = withRefs.map((e, idx) => {
-      const newId = idx + 1;
-      // find element: search by old id
-      return { ...e, id: newId };
-    });
-    // fix mapping: we need el refs - let's store them in order
-    // NOTE: orig elements order changed by sort, but idToElement was built pre-sort.
-    // Easiest: rebuild mapping by selector lookup on demand in actor (querySelector).
-    // For badges + clicks we keep live refs in _refs array:
-    scan._refs = withRefs.map(w => {
-      // recover el via previous map: find key by matching selector+name (approx) OR store ref earlier
-      return null;
-    });
-
-    // --- Correct approach: keep refs alongside ---
-    // Let's rebuild properly with refs:
-    // (We already have seen order; redo quickly storing refs)
-    const snapshot = {
-      url: location.href,
-      title: document.title,
-      timestamp: Date.now(),
-      count: out.length,
-      elements: out
+  function getState(el) {
+    const type = String(el.type || '').toLowerCase();
+    const ariaChecked = el.getAttribute?.('aria-checked');
+    const ariaExpanded = el.getAttribute?.('aria-expanded');
+    const ariaPressed = el.getAttribute?.('aria-pressed');
+    const ariaSelected = el.getAttribute?.('aria-selected');
+    const checked = ['checkbox', 'radio'].includes(type) || getRole(el) === 'checkbox' || getRole(el) === 'radio'
+      ? (ariaChecked === 'true' ? true : ariaChecked === 'false' ? false : !!el.checked)
+      : null;
+    return {
+      disabled: !!el.disabled || el.getAttribute?.('aria-disabled') === 'true',
+      readonly: !!el.readOnly || el.getAttribute?.('aria-readonly') === 'true',
+      required: !!el.required || el.getAttribute?.('aria-required') === 'true',
+      checked,
+      selected: ariaSelected === 'true' ? true : ariaSelected === 'false' ? false : null,
+      expanded: ariaExpanded === 'true' ? true : ariaExpanded === 'false' ? false : null,
+      pressed: ariaPressed === 'true' ? true : ariaPressed === 'false' ? false : null
     };
-    // store live refs separately in window for actor
-    window.__autoRepRefs = {};
-    // re-walk to fill refs by order of out (selector-based recovery is okay for now)
-    // Actor will use selector to re-query live, so refs not strictly needed.
-    lastSnapshot = snapshot;
-    if (badgesVisible) renderBadges();
-    return snapshot;
   }
 
-  // Simpler robust scan v2 that keeps refs correctly (used by default)
-  function scanV2() {
-    const items = [];
-    const roots = [document.body || document.documentElement];
-    document.querySelectorAll('iframe').forEach(f => {
-      try { if (f.contentDocument?.body) roots.push(f.contentDocument.body); } catch (e) {}
-    });
+  function getCapabilities(el, state) {
+    const role = getRole(el);
+    const tag = el.tagName.toLowerCase();
+    const type = String(el.type || '').toLowerCase();
+    const capabilities = [];
+    const reasons = [];
 
-    const candidates = [];
-    for (const root of roots) {
-      for (const el of walk(root)) {
-        if (!isInteractive(el)) continue;
-        if (!isVisible(el)) continue;
-        candidates.push(el);
-        if (candidates.length > 500) break;
-      }
+    if (state.disabled) reasons.push('disabled');
+    if (state.readonly && ['textbox', 'combobox'].includes(role)) reasons.push('readonly');
+
+    if (type === 'file') reasons.push('file-upload-not-supported');
+    else if (['button', 'link', 'summary', 'checkbox', 'radio'].includes(role)) capabilities.push('click');
+    else if (role === 'textbox' && !['file'].includes(type)) capabilities.push('type', 'pressEnter');
+    else if (role === 'combobox') reasons.push('selection-not-supported-by-actor');
+    else if (el.isContentEditable) reasons.push('contenteditable-not-supported-by-actor');
+    else if (tag === 'select') reasons.push('selection-not-supported-by-actor');
+    else if (el.hasAttribute?.('onclick') || el.getAttribute?.('tabindex') !== null) capabilities.push('click');
+    else reasons.push('unsupported-control');
+
+    if (state.readonly && capabilities.includes('type')) {
+      return { capabilities: capabilities.filter(cap => cap !== 'type' && cap !== 'pressEnter'), reasons };
     }
-    // prioritize viewport
-    candidates.sort((a, b) => {
-      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    return { capabilities, reasons };
+  }
+
+  function getSafeValue(el) {
+    const type = String(el.type || '').toLowerCase();
+    if (['password', 'file'].includes(type)) return null;
+    if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return null;
+    return normalizeText(el.value, 100);
+  }
+
+  function getHrefInfo(el) {
+    if (el.tagName !== 'A' || !el.href) return null;
+    try {
+      const target = new URL(el.href, location.href);
+      return {
+        url: target.href.slice(0, 500),
+        sameOrigin: target.origin === location.origin,
+        external: target.origin !== location.origin,
+        target: el.target || '_self'
+      };
+    } catch (e) {
+      return { url: String(el.href).slice(0, 500), sameOrigin: false, external: true, target: el.target || '_self' };
+    }
+  }
+
+  function describeControl(entry, id, formIds) {
+    const el = entry.el;
+    const rect = el.getBoundingClientRect();
+    const state = getState(el);
+    const { capabilities, reasons } = getCapabilities(el, state);
+    const role = getRole(el);
+    const type = String(el.type || '').toLowerCase();
+    const actionable = capabilities.length > 0 && reasons.length === 0;
+    const formId = getFormId(el.form || el.closest?.('form'), formIds);
+    const item = {
+      id,
+      role,
+      tag: el.tagName.toLowerCase(),
+      type,
+      name: getName(el) || '(no name)',
+      state,
+      value: getSafeValue(el),
+      capabilities,
+      actionable,
+      actionabilityReasons: reasons,
+      formId,
+      framePath: entry.framePath || [],
+      inShadowRoot: !!entry.inShadowRoot,
+      href: getHrefInfo(el),
+      selector: buildSelector(el),
+      geometry: {
+        x: Math.round(rect.x + window.scrollX),
+        y: Math.round(rect.y + window.scrollY),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        inViewport: rect.top >= 0 && rect.top <= window.innerHeight
+      }
+    };
+    // Compatibility fields for the existing actor and side panel.
+    item.checked = state.checked;
+    item.disabled = state.disabled;
+    item.x = item.geometry.x;
+    item.y = item.geometry.y;
+    item.inViewport = item.geometry.inViewport;
+    return item;
+  }
+
+  function collectCandidates() {
+    const candidates = [];
+    const seen = new Set();
+    const addRoot = (root, meta = {}) => {
+      for (const entry of walk(root, meta)) {
+        const el = entry.el;
+        if (!isInteractive(el) || !isVisible(el) || seen.has(el)) continue;
+        seen.add(el);
+        candidates.push(entry);
+      }
+    };
+
+    addRoot(document.body || document.documentElement, { framePath: [], inShadowRoot: false });
+
+    const inaccessibleFrames = [];
+    Array.from(document.querySelectorAll('iframe')).forEach((frame, index) => {
+      try {
+        if (frame.contentDocument?.body) {
+          addRoot(frame.contentDocument.body, { framePath: [index], inShadowRoot: false });
+        } else {
+          inaccessibleFrames.push({ index, src: normalizeText(frame.src, 300) });
+        }
+      } catch (e) {
+        inaccessibleFrames.push({ index, src: normalizeText(frame.src, 300) });
+      }
+    });
+    return { candidates, inaccessibleFrames };
+  }
+
+  function scanV2() {
+    const { candidates, inaccessibleFrames } = collectCandidates();
+    const snapshotId = makeSnapshotId();
+    const formIds = new Map();
+    const ordered = candidates.sort((a, b) => {
+      const ra = a.el.getBoundingClientRect();
+      const rb = b.el.getBoundingClientRect();
       const aIn = ra.top >= 0 && ra.top <= window.innerHeight;
       const bIn = rb.top >= 0 && rb.top <= window.innerHeight;
       if (aIn !== bIn) return aIn ? -1 : 1;
       return ra.top - rb.top;
     });
+    const returned = ordered.slice(0, CONTROL_LIMIT);
+    const omittedOverLimit = Math.max(0, ordered.length - returned.length);
 
-    const sliced = candidates.slice(0, 150);
     window.__autoRepRefs = {};
-    const elements = sliced.map((el, i) => {
-      const id = i + 1;
-      window.__autoRepRefs[id] = el;
-      const rect = el.getBoundingClientRect();
-      return {
-        id,
-        role: getRole(el),
-        name: getName(el) || '(no name)',
-        tag: el.tagName.toLowerCase(),
-        type: el.type || '',
-        value: (el.value || '').slice(0, 100),
-        checked: !!el.checked,
-        disabled: !!el.disabled,
-        selector: buildSelector(el),
-        x: Math.round(rect.x + window.scrollX),
-        y: Math.round(rect.y + window.scrollY),
-        inViewport: rect.top >= 0 && rect.top <= window.innerHeight
-      };
+    snapshotRegistry.clear();
+    const elements = returned.map((entry, index) => {
+      const id = index + 1;
+      const item = describeControl(entry, id, formIds);
+      window.__autoRepRefs[id] = entry.el;
+      snapshotRegistry.set(id, { element: entry.el, fingerprint: item, snapshotId });
+      return item;
     });
+    currentSnapshotId = snapshotId;
 
-    lastSnapshot = { url: location.href, title: document.title, timestamp: Date.now(), count: elements.length, elements, page: understandPage() };
+    const page = understandPage(elements, { inaccessibleFrames, formIds });
+    lastSnapshot = {
+      schemaVersion: SNAPSHOT_SCHEMA,
+      snapshotId,
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      count: elements.length,
+      elements,
+      inventory: {
+        scope: ['document', 'open-shadow-dom', 'same-origin-iframes'],
+        limit: CONTROL_LIMIT,
+        candidateCount: ordered.length,
+        returnedCount: elements.length,
+        actionableCount: elements.filter(item => item.actionable).length,
+        truncated: omittedOverLimit > 0,
+        omitted: {
+          overLimit: omittedOverLimit,
+          inaccessibleFrames: inaccessibleFrames.length
+        },
+        ordering: 'viewport-first-then-document-order'
+      },
+      page
+    };
     if (badgesVisible) renderBadges();
     return lastSnapshot;
   }
 
   function renderBadgesV2Note() { return true; }
 
-  function understandPage() {
-    // UNIVERSAL WHOLE-PAGE UNDERSTANDING v2 - makes AI feel powerful on ANY site
-    // Gives BOTH ends: 1) what USER wants (task side handled in brain) 2) what PAGE offers (this side)
+  function understandPage(elements = [], metadata = {}) {
+    // Structured page facts are intentionally smaller and safer than outerHTML.
     try {
-      const visible = el => { try { return !!(el.offsetWidth || el.getClientRects().length) && el.innerText; } catch (e) { return false; } };
-
-      const headings = Array.from(document.querySelectorAll('h1,h2,h3'))
-        .filter(h => h.innerText && h.innerText.trim().length > 0 && h.offsetParent !== null)
-        .slice(0, 12).map(h => `${h.tagName}: ${h.innerText.trim().slice(0, 120)}`);
-
-      // landmarks & sections
-      const navLinks = Array.from(document.querySelectorAll('nav a, header a'))
-        .filter(a => a.innerText.trim()).slice(0, 10).map(a => a.innerText.trim().slice(0, 40));
-
-      const formsDetailed = Array.from(document.querySelectorAll('form')).slice(0, 4).map(f => {
-        const fields = Array.from(f.querySelectorAll('input,select,textarea')).slice(0, 12).map(inp => {
-          const lab = inp.labels?.[0]?.innerText?.trim() || inp.placeholder || inp.name || inp.type;
-          return `${inp.tagName.toLowerCase()}[${inp.type||''}] "${(lab||'').slice(0,40)}"`;
-        });
-        return { id: f.id || f.name || 'form', fields, submit: !!f.querySelector('[type=submit],button') };
-      });
-
-      // standalone inputs outside forms (YouTube, Google search etc)
-      const loneInputs = Array.from(document.querySelectorAll('input[type="search"], input[type="text"], input:not([type])'))
-        .filter(el => el.offsetParent !== null && !el.closest('form'))
-        .slice(0, 5).map(el => `input "${(el.placeholder||el.name||el.getAttribute('aria-label')||'search').slice(0,50)}"`);
-
-      // prices / products / videos - key entities AI needs
       const bodyAllText = document.body ? document.body.innerText || '' : '';
-      const priceMatches = (bodyAllText.match(/(₹\s?[\d,]+|\$\s?[\d,.]+|€\s?[\d,.]+)/g) || []).slice(0, 8);
-      const videoTitles = Array.from(document.querySelectorAll('a#video-title, ytd-video-renderer a, [class*="video"] a'))
-        .map(a => a.innerText.trim()).filter(t => t.length > 5).slice(0, 6);
-      const productNames = Array.from(document.querySelectorAll('[data-asin] h2, .s-title, [class*="product"] h2, [class*="card"] h3'))
-        .map(h => h.innerText.trim()).filter(t => t.length > 5).slice(0, 6);
-      const tableInfo = (() => {
-        const t = document.querySelector('table');
-        if (!t) return null;
-        const headers = Array.from(t.querySelectorAll('th')).map(h => h.innerText.trim()).slice(0, 8);
-        return { headers, rows: t.querySelectorAll('tr').length };
-      })();
-
-      let mainText = bodyAllText.replace(/\s+/g, ' ').trim().slice(0, 3500);
-
-      // NO MORE RULE-BASED pageType! User is right: AI brain is powerful enough.
-      // We just give RAW FACTS: domain, URL structure, signals. AI infers what page is.
+      const normalizedBodyText = bodyAllText.replace(/\s+/g, ' ').trim();
+      const textPreview = normalizedBodyText.slice(0, TEXT_PREVIEW_LIMIT);
       const urlObj = (() => { try { return new URL(location.href); } catch (e) { return null; } })();
       const domain = urlObj ? urlObj.hostname : location.hostname;
-      const urlPath = urlObj ? urlObj.pathname.slice(0, 200) : '';
-      const urlQuery = urlObj ? urlObj.search.slice(0, 200) : '';
-      // tiny hint only for offline Scan display (AI is allowed to IGNORE/override this)
+      const urlPath = urlObj ? urlObj.pathname.slice(0, 300) : '';
+      const urlQuery = urlObj ? urlObj.search.slice(0, 300) : '';
+      const pathSegments = urlPath.split('/').filter(Boolean).slice(0, 20);
+      const queryKeys = urlObj ? Array.from(urlObj.searchParams.keys()).slice(0, 20) : [];
+      const lowerText = normalizedBodyText.toLowerCase();
+      const lowerUrl = location.href.toLowerCase();
+
+      const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4'))
+        .filter(h => isVisible(h) && normalizeText(h.innerText))
+        .slice(0, HEADING_LIMIT)
+        .map(h => ({ level: Number(h.tagName.slice(1)), text: normalizeText(h.innerText, 160) }));
+
+      const landmarks = Array.from(document.querySelectorAll('main,nav,header,footer,aside,[role="main"],[role="navigation"],[role="dialog"]'))
+        .filter(el => isVisible(el) || el.getAttribute('role') === 'dialog')
+        .slice(0, 20)
+        .map(el => ({
+          role: el.getAttribute('role') || el.tagName.toLowerCase(),
+          name: normalizeText(el.getAttribute('aria-label') || el.innerText, 100),
+          tag: el.tagName.toLowerCase()
+        }));
+
+      const navLinks = Array.from(document.querySelectorAll('nav a, header a'))
+        .filter(a => isVisible(a) && normalizeText(a.innerText))
+        .slice(0, 15)
+        .map(a => normalizeText(a.innerText, 80));
+
+      const formsDetailed = Array.from(document.querySelectorAll('form')).slice(0, FORM_LIMIT).map((form, index) => {
+        const formId = metadata.formIds?.get(form) || 'form-' + (index + 1);
+        const controls = elements.filter(item => item.formId === formId).map(item => item.id);
+        const action = form.getAttribute('action') || location.pathname;
+        return {
+          id: formId,
+          name: normalizeText(form.getAttribute('aria-label') || form.name || form.id, 100),
+          method: String(form.method || 'get').toLowerCase(),
+          actionPath: normalizeText(action, 300),
+          controlIds: controls,
+          submitControlIds: controls.filter(id => {
+            const item = elements.find(control => control.id === id);
+            return item && item.role === 'button' && (item.type === 'submit' || item.name.toLowerCase().includes('submit'));
+          })
+        };
+      });
+
+      const tables = Array.from(document.querySelectorAll('table')).slice(0, TABLE_LIMIT).map((table, index) => ({
+        index,
+        caption: normalizeText(table.querySelector('caption')?.innerText, 120),
+        headers: Array.from(table.querySelectorAll('th')).slice(0, 12).map(th => normalizeText(th.innerText, 100)),
+        rows: table.querySelectorAll('tr').length
+      }));
+
+      const dialogs = Array.from(document.querySelectorAll('dialog,[role="dialog"]')).slice(0, 8).map(dialog => ({
+        role: dialog.getAttribute('role') || 'dialog',
+        name: normalizeText(dialog.getAttribute('aria-label') || dialog.innerText, 120),
+        open: dialog.tagName.toLowerCase() === 'dialog' ? !!dialog.open : isVisible(dialog),
+        modal: dialog.getAttribute('aria-modal') === 'true'
+      }));
+
+      const loneInputs = elements
+        .filter(item => item.role === 'textbox' && !item.formId)
+        .slice(0, 10)
+        .map(item => `${item.tag}[${item.type || 'text'}] "${item.name}"`);
+
+      const priceMatches = (normalizedBodyText.match(/(₹\s?[\d,]+|\$\s?[\d,.]+|€\s?[\d,.]+|£\s?[\d,.]+)/g) || []).slice(0, 12);
+      const videoTitles = Array.from(document.querySelectorAll('a#video-title, ytd-video-renderer a, [class*="video"] a'))
+        .map(a => normalizeText(a.innerText, 160)).filter(text => text.length > 5).slice(0, 8);
+      const productNames = Array.from(document.querySelectorAll('[data-asin] h2, .s-title, [class*="product"] h2, [class*="card"] h3'))
+        .map(h => normalizeText(h.innerText, 160)).filter(text => text.length > 5).slice(0, 8);
+
       let pageHint = 'generic';
-      const bt = mainText.toLowerCase();
-      const lowUrl = location.href.toLowerCase();
-      if (/login|signin/.test(lowUrl) || /sign in/.test(bt.slice(0,500))) pageHint = 'maybe-auth';
-      else if (lowUrl.includes('youtube.com')) pageHint = 'maybe-video';
-      else if (/checkout|payment/.test(bt)) pageHint = 'maybe-checkout';
-      else if (/add to cart|buy now/.test(bt)) pageHint = 'maybe-product';
+      if (/login|signin|sign-in|auth/.test(lowerUrl) || /sign in|log in|password/.test(lowerText.slice(0, 800))) pageHint = 'maybe-auth';
+      else if (/youtube\./.test(domain) || videoTitles.length) pageHint = 'maybe-video';
+      else if (/checkout|payment|billing/.test(lowerUrl) || /checkout|payment|card number|cvv/.test(lowerText)) pageHint = 'maybe-checkout';
+      else if (/add to cart|buy now|product/.test(lowerText)) pageHint = 'maybe-product';
+      else if (formsDetailed.length || elements.some(item => item.role === 'textbox')) pageHint = 'maybe-form';
 
-      // human-readable summary - raw, no decision
-      const summary = `${document.title} on ${domain}${urlPath} | hint=${pageHint} | ` +
-        `headings[${headings.length}] forms[${formsDetailed.length}] ` +
-        `${priceMatches.length ? 'prices:' + priceMatches.slice(0,3).join(',') + ' ' : ''}` +
-        `${videoTitles.length ? 'videos:' + videoTitles.slice(0,2).join(' | ').slice(0,120) + ' ' : ''}` +
-        `${productNames.length ? 'products:' + productNames.slice(0,2).join(' | ').slice(0,120) : ''}`.trim();
+      const countsByRole = {};
+      elements.forEach(item => { countsByRole[item.role] = (countsByRole[item.role] || 0) + 1; });
+      const scrollY = Math.round(window.scrollY);
+      const pageHeight = document.documentElement?.scrollHeight || document.body?.scrollHeight || 0;
+      const viewportHeight = window.innerHeight || 0;
+      const signals = {
+        prices: priceMatches,
+        videoTitles,
+        productNames,
+        authSignals: /login|signin|sign-in|password|one-time code|otp/.test(lowerUrl + ' ' + lowerText),
+        paymentSignals: /payment|checkout|billing|card number|cvv|upi|stripe|razorpay/.test(lowerUrl + ' ' + lowerText),
+        captchaSignals: /captcha|verify you are human|are you a robot/.test(lowerText),
+        needsHuman: /captcha|otp|one-time code|verify you are human|payment|checkout|card number|cvv|upi|stripe|razorpay/.test(lowerUrl + ' ' + lowerText)
+      };
 
-      const counts = {};
-      try { (lastSnapshot?.elements || []).forEach(e => { counts[e.role] = (counts[e.role] || 0) + 1; }); } catch (e) {}
+      const counts = {
+        controlsByRole: countsByRole,
+        visibleControls: elements.filter(item => item.geometry.inViewport).length,
+        actionableControls: elements.filter(item => item.actionable).length,
+        disabledControls: elements.filter(item => item.state.disabled).length,
+        forms: formsDetailed.length,
+        tables: tables.length,
+        headings: headings.length,
+        dialogs: dialogs.length
+      };
+
+      const summary = `${document.title || '(untitled)'} on ${domain}${urlPath} | hint=${pageHint} | ` +
+        `controls:${elements.length} forms:${formsDetailed.length} headings:${headings.length}` +
+        `${priceMatches.length ? ' prices:' + priceMatches.slice(0, 3).join(',') : ''}` +
+        `${videoTitles.length ? ' videos:' + videoTitles.slice(0, 2).join(' | ').slice(0, 120) : ''}` +
+        `${productNames.length ? ' products:' + productNames.slice(0, 2).join(' | ').slice(0, 120) : ''}`;
 
       return {
-        url: location.href, title: document.title,
-        domain, urlPath, urlQuery,
+        url: location.href,
+        title: document.title,
+        domain,
+        urlPath,
+        urlQuery,
         lang: document.documentElement.lang || 'en',
-        pageHint, summary, // hint only, AI decides real type
-        headings, navLinks, forms: formsDetailed, loneInputs,
-        prices: priceMatches, videos: videoTitles, products: productNames, table: tableInfo,
-        mainText, counts,
-        scrollY: Math.round(window.scrollY), pageHeight: document.body ? document.body.scrollHeight : 0,
-        needsHuman: /captcha|otp|verify you are human|payment|upi|card|cvv|razorpay|stripe/i.test(mainText)
+        pageHint,
+        summary,
+        site: {
+          hostname: domain,
+          domain,
+          origin: urlObj?.origin || location.origin,
+          protocol: urlObj?.protocol || location.protocol
+        },
+        location: {
+          path: urlPath,
+          pathSegments,
+          queryKeys,
+          hashPresent: !!(urlObj?.hash)
+        },
+        document: {
+          title: document.title,
+          language: document.documentElement.lang || 'en',
+          direction: document.documentElement.dir || 'ltr'
+        },
+        viewport: {
+          width: window.innerWidth,
+          height: viewportHeight,
+          scrollX: Math.round(window.scrollX),
+          scrollY,
+          pageWidth: document.documentElement?.scrollWidth || 0,
+          pageHeight,
+          atTop: scrollY <= 2,
+          atBottom: scrollY + viewportHeight >= pageHeight - 2
+        },
+        headings,
+        landmarks,
+        navLinks,
+        forms: formsDetailed,
+        loneInputs,
+        tables,
+        table: tables[0] || null,
+        dialogs,
+        contentSignals: signals,
+        prices: priceMatches,
+        videos: videoTitles,
+        products: productNames,
+        mainText: textPreview,
+        text: {
+          preview: textPreview,
+          characterCount: normalizedBodyText.length,
+          truncated: normalizedBodyText.length > TEXT_PREVIEW_LIMIT
+        },
+        frames: {
+          sameOriginScanned: elements.filter(item => item.framePath.length > 0).length,
+          inaccessible: metadata.inaccessibleFrames || []
+        },
+        counts,
+        scrollY,
+        pageHeight,
+        needsHuman: signals.needsHuman
       };
     } catch (e) {
-      return { url: location.href, title: document.title, pageType: 'unknown', summary: document.title, error: String(e).slice(0, 200) };
+      return {
+        url: location.href,
+        title: document.title,
+        domain: location.hostname,
+        pageHint: 'unknown',
+        summary: document.title,
+        error: String(e).slice(0, 200)
+      };
     }
   }
 
@@ -442,18 +614,23 @@
   // expose API for sidepanel + actor
   window.AutoRepPerception = {
     scan: scanV2,
-    understand: () => understandPage(),
+    understand: () => scanV2().page,
     toggleBadges,
     clearBadges,
     saveSnapshot,
     getLast: () => lastSnapshot,
+    getSnapshotId: () => currentSnapshotId,
+    getRegistryEntry: (id) => snapshotRegistry.get(Number(id)) || null,
     getElementById: (id) => (window.__autoRepRefs || {})[id] || null
   };
 
   // listen for messages from sidepanel
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'AUTOREP_SCAN') sendResponse({ ok: true, snapshot: scanV2() });
-    if (msg.type === 'AUTOREP_UNDERSTAND') sendResponse({ ok: true, page: understandPage(), snapshot: lastSnapshot || scanV2() });
+    if (msg.type === 'AUTOREP_UNDERSTAND') {
+      const snapshot = scanV2();
+      sendResponse({ ok: true, page: snapshot.page, snapshot });
+    }
     if (msg.type === 'AUTOREP_TOGGLE_BADGES') sendResponse({ ok: true, visible: toggleBadges(msg.show) });
     if (msg.type === 'AUTOREP_SAVE') sendResponse({ ok: true, ...saveSnapshot() });
     return true;
