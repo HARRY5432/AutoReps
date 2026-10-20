@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "AutoRep - Plain English Web Autopilot",
+  "version": "0.1.0",
+  "description": "Type in plain English, AI does boring tasks on any website. BYOK - any AI model.",
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open AutoRep"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/perception.js", "content/actor.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

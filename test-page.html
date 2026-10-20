@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>AutoRep Test Lab</title>
+<style>body{font-family:system-ui;max-width:700px;margin:30px auto;padding:20px}button,input,select{padding:10px;margin:6px}nav{background:#eee;padding:10px}</style>
+</head><body>
+<nav><a href="#">Home</a> | <a href="#">Products</a> | <button onclick="alert('nav btn')">Cart (2)</button></nav>
+<h1>AutoRep Perception Test</h1>
+<p>If our eyes work, Scan should find ~15 elements below with clean names.</p>
+<input placeholder="Search products..." id="s">
+<input type="checkbox" id="c"><label for="c">I agree</label><br>
+<select><option>Option A</option><option>Option B</option></select><br>
+<button onclick="document.getElementById('out').innerText='clicked!'">Add to Cart</button>
+<button onclick="this.remove()">Delete me (dynamic test)</button>
+<a href="https://example.com">Next page →</a>
+<div onclick="alert('div btn')" style="cursor:pointer;background:#ddd;padding:10px">Div fake button</div>
+<div id="shadow-host"></div>
+<div id="out" style="color:green;font-weight:bold"></div>
+<div style="display:none"><button>Hidden should be ignored</button></div>
+<script>document.getElementById('shadow-host').attachShadow({mode:'open'}).innerHTML='<button>Shadow DOM button</button><input placeholder="shadow input">';</script>
+<table border="1"><tr><td>Laptop</td><td>45000</td></tr><tr><td>Mouse</td><td>500</td></tr></table>
+</body></html>
