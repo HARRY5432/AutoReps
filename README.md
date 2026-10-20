@@ -15,6 +15,8 @@ page → structured scan
 
 The Run loop now validates model actions against the current inventory, binds actions to the scan's `snapshotId`, and pauses when the page contains auth, payment, OTP, CAPTCHA, or similar sensitive-flow signals.
 
+The side panel now has a visual workflow: inspect the page, see the target domain and control count, filter the discovered controls, highlight a control on the website, try a click/type/select action without writing code, and read whether the page visibly responded. Diagnostics remain available below the main workflow instead of being the primary interface.
+
 The current inventory includes ordinary controls, open Shadow DOM controls, and accessible same-origin iframe controls. Cross-origin iframe controls are reported as inaccessible rather than guessed.
 
 ## Requirements
@@ -39,9 +41,10 @@ The test command validates the MV3 manifest, JavaScript syntax, the structured p
 2. Enable **Developer mode**.
 3. Choose **Load unpacked**.
 4. Select this project directory.
-5. Open `test-page.html` in a normal tab.
-6. Click the AutoRep toolbar action, open the side panel, and press **Scan**.
-7. Toggle **Badges** to compare the reported control ids with the page.
+5. Open the extension's **Details** page and enable **Allow access to file URLs** if you are testing `test-page.html` directly from disk.
+6. Open `test-page.html` in a normal tab and reload it after enabling the extension.
+7. Click the AutoRep toolbar action, open the side panel, and press **Inspect page**.
+8. Use **Show on page** or **Try click** on a visible control to confirm the website-side marker and response.
 
 ## Test fixture
 
@@ -65,4 +68,5 @@ AutoRep does **not** send the whole serialized HTML document to the model. Full 
 - Chrome/browser integration tests are not automated yet.
 - Provider adapters still use the existing OpenAI-compatible request path.
 - Native select and contenteditable actions are now supported; file uploads remain intentionally unsupported.
+- Action results distinguish verified page changes from actions that were sent but produced no visible response.
 - A later slice can move more run state into the service worker for persistence across side-panel closes.

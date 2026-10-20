@@ -39,6 +39,9 @@ assert.match(perception, /open-shadow-dom/);
 assert.match(perception, /inaccessibleFrames/);
 assert.match(perception, /actionabilityReasons/);
 assert.match(perception, /getRegistryEntry/);
+assert.match(perception, /AUTOREP_FOCUS/);
+assert.match(perception, /__autorep-action-marker/);
+assert.match(perception, /isAutoRepOwnedNode/);
 
 assert.match(provider, /snapshotId/);
 assert.match(provider, /INVENTORY/);
@@ -56,6 +59,8 @@ assert.match(actor, /AUTOREP_SELECT/);
 assert.match(actor, /AUTOREP_CANCEL_RUN/);
 assert.match(actor, /contentEditable/);
 assert.match(actor, /dispatchEvent\(new Event\('change'/);
+assert.match(actor, /status = observed\.verified/);
+assert.match(actor, /showActionMarker/);
 assert.match(sidepanel, /snapshotId:s\.snapshot\.snapshotId/);
 assert.match(sidepanel, /validatePlan/);
 assert.match(sidepanel, /human review required/);
@@ -63,13 +68,19 @@ assert.match(sidepanel, /sendToTab/);
 assert.match(sidepanel, /AbortController/);
 assert.match(sidepanel, /runId/);
 assert.match(background, /tabId/);
+assert.match(sidepanel, /renderControls/);
+assert.match(sidepanel, /Page responded/);
 assert.match(sidepanelHtml, /id="stop"/);
+assert.match(sidepanelHtml, /What AutoRep sees/);
+assert.match(sidepanelHtml, /id="controlList"/);
+assert.match(sidepanelHtml, /id="timeline"/);
 
 assert.match(fixture, /attachShadow/);
 assert.match(fixture, /type="checkbox"/);
 assert.match(fixture, /<select id="choice">/);
 assert.match(fixture, /contenteditable="true"/);
 assert.match(fixture, /disabled>Disabled Option/);
+assert.match(fixture, /shadow button clicked/);
 assert.match(fixture, /<button/);
 
 console.log('AutoRep smoke checks passed');

@@ -3,32 +3,157 @@
 <head>
 <meta charset="utf-8">
 <style>
-body{font-family:system-ui;width:360px;margin:0;padding:14px;background:#0f0f14;color:#eee}
-h2{margin:0 0 8px;font-size:18px;color:#a78bfa}
-textarea{width:100%;height:70px;border-radius:10px;padding:10px;background:#1c1c26;color:#fff;border:1px solid #333}
-button{background:#7c3aed;color:#fff;border:0;border-radius:10px;padding:9px 12px;margin:4px 2px;cursor:pointer;font-weight:600}
-button.secondary{background:#262633}
-button:hover{filter:brightness(1.15)}
-.row{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
-input,select{width:100%;padding:7px;border-radius:8px;background:#1c1c26;color:#fff;border:1px solid #333;margin:3px 0}
-#log{background:#000;border-radius:10px;padding:10px;height:220px;overflow:auto;font-size:12px;white-space:pre-wrap;margin-top:8px;border:1px solid #333}
-details{margin-top:8px;font-size:13px}
-summary{cursor:pointer;color:#a78bfa}
-.badge{font-size:11px;color:#888}
+:root{color-scheme:dark;--bg:#0b0d12;--panel:#141821;--panel2:#1b2130;--line:#2b3446;--muted:#9aa6b8;--text:#f4f7fb;--purple:#9b7cff;--blue:#55a8ff;--green:#43d18a;--amber:#f6bd57;--red:#ff6d7d}
+*{box-sizing:border-box}
+body{font-family:Inter,system-ui,-apple-system,sans-serif;width:430px;margin:0;padding:14px;background:var(--bg);color:var(--text);font-size:13px}
+h1,h2,h3,p{margin:0}
+h1{font-size:18px;letter-spacing:-.02em}
+h2{font-size:13px;margin-bottom:8px}
+button,input,select,textarea{font:inherit}
+button{background:var(--purple);color:#fff;border:0;border-radius:9px;padding:9px 12px;cursor:pointer;font-weight:700;transition:.15s ease}
+button:hover{filter:brightness(1.13);transform:translateY(-1px)}
+button:disabled{cursor:not-allowed;opacity:.45;transform:none}
+button.secondary{background:#293244;color:#dbe4f4}
+button.ghost{background:transparent;color:#aab8cc;border:1px solid var(--line);padding:6px 9px}
+input,select,textarea{width:100%;padding:9px;border-radius:9px;background:#10151e;color:var(--text);border:1px solid var(--line);outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--purple);box-shadow:0 0 0 3px #9b7cff22}
+textarea{height:78px;resize:vertical}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.brand{display:flex;align-items:center;gap:9px}
+.brand-mark{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(135deg,#7c3aed,#55a8ff);font-size:17px}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-top:2px}
+.status-pill{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:5px 9px;color:var(--muted);font-size:11px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--amber)}
+.dot.good{background:var(--green);box-shadow:0 0 10px #43d18a88}
+.dot.bad{background:var(--red)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:11px;margin-bottom:10px}
+.target-card{background:linear-gradient(135deg,#171b29,#111720)}
+.target-line{display:flex;align-items:flex-start;gap:9px}
+.target-icon{font-size:18px}
+.target-text{min-width:0;flex:1}
+.target-title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.target-url{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+.target-state{font-size:11px;color:var(--green);margin-top:7px}
+.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.section-head span{font-size:11px;color:var(--muted)}
+.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.actions button{flex:1;min-width:110px}
+.task-label{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-bottom:5px}
+.run-card{border-color:#5746a0;background:linear-gradient(135deg,#191832,#141821)}
+.run-status{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.run-status-main{font-weight:700}
+.run-status-sub{color:var(--muted);font-size:11px;margin-top:3px;max-width:290px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.state-badge{font-size:10px;border-radius:999px;padding:5px 8px;background:#293244;color:#cbd5e5;white-space:nowrap}
+.state-badge.acting{background:#3d2d72;color:#dacfff}
+.state-badge.verified{background:#173c2d;color:#9af0c3}
+.state-badge.warning{background:#4d3a1b;color:#ffd889}
+.state-badge.failed{background:#512630;color:#ffadb8}
+.progress{height:5px;background:#252d3d;border-radius:99px;overflow:hidden;margin-top:10px}
+.progress>div{height:100%;width:0;background:linear-gradient(90deg,var(--purple),var(--blue));transition:width .25s ease}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 6px;text-align:center}
+.stat strong{display:block;font-size:18px}
+.stat span{font-size:10px;color:var(--muted)}
+.controls-toolbar{display:flex;gap:7px;margin-bottom:8px}
+.controls-toolbar input{flex:1}
+.control-list{display:flex;flex-direction:column;gap:7px;max-height:330px;overflow:auto;padding-right:2px}
+.control{background:#10151e;border:1px solid var(--line);border-radius:10px;padding:9px}
+.control:hover{border-color:#5c6b86}
+.control-top{display:flex;align-items:flex-start;gap:8px}
+.control-id{font-size:10px;color:#d7caff;background:#3b2d69;border-radius:6px;padding:3px 5px;min-width:24px;text-align:center}
+.control-main{min-width:0;flex:1}
+.control-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.control-meta{color:var(--muted);font-size:10px;margin-top:2px}
+.control-cap{color:#93c8ff;font-size:10px;margin-top:5px}
+.control-actions{display:flex;gap:5px;margin-top:8px}
+.control-actions button{padding:5px 8px;font-size:11px}
+.empty{padding:18px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:9px}
+.timeline{display:flex;flex-direction:column;gap:7px;max-height:190px;overflow:auto}
+.event{display:flex;gap:8px;align-items:flex-start;padding:7px 8px;background:#10151e;border-left:3px solid var(--line);border-radius:6px}
+.event.acting{border-left-color:var(--blue)}
+.event.verified{border-left-color:var(--green)}
+.event.warning{border-left-color:var(--amber)}
+.event.failed{border-left-color:var(--red)}
+.event-time{font-size:10px;color:var(--muted);min-width:42px}
+.event-text{font-size:11px;line-height:1.35}
+.event-text strong{display:block;color:var(--text)}
+.hint{color:var(--muted);font-size:11px;line-height:1.35}
+details{margin-top:8px;font-size:12px}
+summary{cursor:pointer;color:#b9a9ff;font-weight:700}
+#log{background:#080a0e;border-radius:9px;padding:9px;height:150px;overflow:auto;font-size:10px;white-space:pre-wrap;margin-top:8px;border:1px solid var(--line);color:#aeb9c9}
+.hidden{display:none!important}
 </style>
 </head>
 <body>
-<h2>🤖 AutoRep Autopilot</h2>
-<div class="badge">plain english → does it on any site • BYOK</div>
-<textarea id="task" placeholder='e.g. search laptop under 50k and extract top 5'></textarea>
-<div class="row">
-<button id="run">▶ Run</button>
-<button id="stop" class="secondary" disabled>■ Stop</button>
-<button id="scan" class="secondary">👁 Scan</button>
-<button id="badges" class="secondary"># Badges</button>
-<button id="extract" class="secondary">📄 Extract</button>
-</div>
-<div id="log">ready. open any website then Scan.\n</div>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">✦</div>
+    <div><h1>AutoRep</h1><div class="eyebrow">visual web assistant</div></div>
+  </div>
+  <div class="status-pill"><span id="connectionDot" class="dot"></span><span id="connectionText">Not inspected</span></div>
+</header>
+
+<section class="card target-card">
+  <div class="target-line">
+    <div class="target-icon">🌐</div>
+    <div class="target-text">
+      <div id="targetTitle" class="target-title">Open a website to begin</div>
+      <div id="targetUrl" class="target-url">AutoRep will inspect the active tab</div>
+      <div id="targetState" class="target-state">No page scan yet</div>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="task-label"><span>What should AutoRep do?</span><span>Plain English</span></div>
+  <textarea id="task" placeholder="Example: find the search box, search for laptops, and show me the results"></textarea>
+  <div class="actions">
+    <button id="run">▶ Start task</button>
+    <button id="stop" class="secondary" disabled>■ Stop</button>
+  </div>
+  <p class="hint" style="margin-top:8px">AutoRep will inspect the page first. You will see the exact control it is using and whether the page visibly responded.</p>
+</section>
+
+<section class="card run-card">
+  <div class="run-status">
+    <div><div id="currentAction" class="run-status-main">Ready to inspect</div><div id="currentDetail" class="run-status-sub">Nothing is running yet.</div></div>
+    <div id="stateBadge" class="state-badge">READY</div>
+  </div>
+  <div class="progress"><div id="progressBar"></div></div>
+</section>
+
+<section class="card">
+  <div class="section-head"><h2>What AutoRep sees</h2><span id="scanAge">Not scanned</span></div>
+  <div class="stats">
+    <div class="stat"><strong id="controlCount">–</strong><span>controls</span></div>
+    <div class="stat"><strong id="actionableCount">–</strong><span>usable</span></div>
+    <div class="stat"><strong id="formCount">–</strong><span>forms</span></div>
+    <div class="stat"><strong id="domainName">–</strong><span>domain</span></div>
+  </div>
+  <div class="actions">
+    <button id="scan" class="secondary">🔎 Inspect page</button>
+    <button id="badges" class="secondary">📍 Show targets</button>
+    <button id="extract" class="secondary">📖 Read page</button>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head"><h2>Controls on this page</h2><span id="controlHelp">Inspect a page to populate</span></div>
+  <div class="controls-toolbar">
+    <input id="controlFilter" placeholder="Filter by name, button, search…">
+  </div>
+  <div id="controlList" class="control-list"><div class="empty">No page inspected yet.<br>Click “Inspect page” to see where AutoRep can interact.</div></div>
+</section>
+
+<section class="card">
+  <div class="section-head"><h2>What just happened</h2><button id="clearTimeline" class="ghost">Clear</button></div>
+  <div id="timeline" class="timeline"><div class="empty">Your actions and page responses will appear here.</div></div>
+</section>
+
+<details>
+  <summary>Diagnostics (only if something is wrong)</summary>
+  <div id="log">No diagnostics yet.</div>
+</details>
 <details>
 <summary>⚙ AI Settings (agnostic - any model)</summary>
 <label>Provider</label>

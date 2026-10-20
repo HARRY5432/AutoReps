@@ -16,6 +16,13 @@
 <div id="shadow-host"></div>
 <div id="out" style="color:green;font-weight:bold"></div>
 <div style="display:none"><button>Hidden should be ignored</button></div>
-<script>document.getElementById('shadow-host').attachShadow({mode:'open'}).innerHTML='<button>Shadow DOM button</button><input placeholder="shadow input">';</script>
+<script>
+const shadow = document.getElementById('shadow-host').attachShadow({mode:'open'});
+shadow.innerHTML='<button id="shadow-button">Shadow DOM button</button><input placeholder="shadow input">';
+shadow.querySelector('button').onclick=()=>document.getElementById('out').innerText='shadow button clicked';
+shadow.querySelector('input').addEventListener('input', event=>document.getElementById('out').innerText='shadow input: '+event.target.value);
+document.getElementById('choice').addEventListener('change', event=>document.getElementById('out').innerText='selected: '+event.target.value);
+document.getElementById('editor').addEventListener('input', event=>document.getElementById('out').innerText='editor updated');
+</script>
 <table border="1"><tr><td>Laptop</td><td>45000</td></tr><tr><td>Mouse</td><td>500</td></tr></table>
 </body></html>

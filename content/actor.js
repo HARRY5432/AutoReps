@@ -65,6 +65,39 @@
     return new Promise(resolve => setTimeout(() => resolve(runError(runId)), 450));
   }
 
+  function captureState(el) {
+    return {
+      url: el.ownerDocument?.defaultView?.location?.href || location.href,
+      value: typeof el.value === 'string' ? el.value : null,
+      text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      checked: typeof el.checked === 'boolean' ? el.checked : null,
+      selectedIndex: typeof el.selectedIndex === 'number' ? el.selectedIndex : null,
+      expanded: el.getAttribute?.('aria-expanded'),
+      pressed: el.getAttribute?.('aria-pressed'),
+      selected: el.getAttribute?.('aria-selected')
+    };
+  }
+
+  function observeAction(el, before, duration=750) {
+    const doc = el.ownerDocument || document;
+    let domChanged = false;
+    const observer = new MutationObserver(() => { domChanged = true; });
+    try {
+      observer.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    } catch (e) {}
+    return new Promise(resolve => setTimeout(() => {
+      observer.disconnect();
+      const after = captureState(el);
+      const stateChanged = ['value', 'text', 'checked', 'selectedIndex', 'expanded', 'pressed', 'selected'].some(key => before[key] !== after[key]);
+      const urlChanged = before.url !== after.url;
+      resolve({ domChanged, stateChanged, urlChanged, after, verified: domChanged || stateChanged || urlChanged });
+    }, duration));
+  }
+
+  function mark(id, status, message, snapshotId) {
+    try { return window.AutoRepPerception?.showActionMarker?.(id, status, message, snapshotId, false); } catch (e) { return null; }
+  }
+
   async function doClick(id, selector, snapshotId, runId) {
     const resolved = getEl(id, selector, snapshotId, runId);
     if (!resolved.ok) return resolved;
@@ -82,11 +115,17 @@
     if (cancelled) return cancelled;
     if (!el.isConnected) return { ok: false, errorCode: 'STALE_TARGET', error: 'The target disappeared while scrolling.' };
     el.focus?.();
+    const before = captureState(el);
+    const observation = observeAction(el, before);
     // Prefer native activation. Synthetic pointer events are not trusted input
     // and often do not trigger the browser's default behavior.
     if (typeof el.click === 'function') el.click();
     else el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    return { ok: true, id, tag: el.tagName, name: (el.innerText || el.value || '').slice(0, 80) };
+    const observed = await observation;
+    const status = observed.verified ? 'verified' : 'unverified';
+    const message = observed.verified ? 'The website showed a visible response.' : 'The click was sent, but no visible page response was detected.';
+    mark(id, status === 'verified' ? 'verified' : 'warning', message, snapshotId);
+    return { ok: true, status, id, tag: el.tagName, name: (el.innerText || el.value || '').slice(0, 80), observed, message };
   }
 
   async function doType(id, text, selector, pressEnter, snapshotId, runId) {
@@ -107,6 +146,7 @@
     await new Promise(r => setTimeout(r, 150));
     const afterFocus = runError(runId);
     if (afterFocus) return afterFocus;
+    const before = captureState(el);
 
     if (el.isContentEditable) {
       const doc = el.ownerDocument || document;
@@ -136,7 +176,13 @@
         await new Promise(r => setTimeout(r, 800));
         await trySubmitFallback(el);
       }
-      return { ok: true, id, typed: text, contentEditable: true };
+      const after = captureState(el);
+      const expected = String(text);
+      const verified = after.text === expected || after.text.includes(expected);
+      const status = verified ? 'verified' : 'failed';
+      const message = verified ? 'The editable area contains the requested text.' : 'The page did not keep the requested text in the editable area.';
+      mark(id, verified ? 'verified' : 'failed', message, snapshotId);
+      return { ok: verified, status, id, typed: text, contentEditable: true, observed: { stateChanged: before.text !== after.text, value: after.text }, message, error: verified ? null : message };
     }
 
     // React-proof clear + set (YouTube, Gmail, React apps need native setter)
@@ -179,7 +225,12 @@
       // if URL didn't change and we're on YouTube/Google, try clicking search button fallback
       await trySubmitFallback(el);
     }
-    return { ok: true, id, typed: text };
+    const after = captureState(el);
+    const verified = after.value === String(text);
+    const status = verified ? 'verified' : 'failed';
+    const message = verified ? 'The field contains the requested text.' : 'The page changed or rejected the requested text.';
+    mark(id, verified ? 'verified' : 'failed', message, snapshotId);
+    return { ok: verified, status, id, typed: text, observed: { stateChanged: before.value !== after.value, value: after.value }, message, error: verified ? null : message };
   }
 
   async function doPressEnter(id, selector, snapshotId, runId) {
@@ -213,6 +264,9 @@
     if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') {
       return { ok: false, errorCode: 'UNSUPPORTED_ACTION', error: 'The select control is disabled.' };
     }
+    const afterScroll = await scrollIntoViewSafe(el, runId);
+    if (afterScroll) return afterScroll;
+    if (!el.isConnected) return { ok: false, errorCode: 'STALE_TARGET', error: 'The select control disappeared while scrolling.' };
     const requested = String(option ?? '').trim().toLowerCase();
     const matches = Array.from(el.options || []).filter(candidate => {
       if (candidate.disabled) return false;
@@ -223,11 +277,18 @@
     const candidate = matches[0];
     const cancelled = runError(runId);
     if (cancelled) return cancelled;
+    const before = captureState(el);
+    const observation = observeAction(el, before, 500);
     el.value = candidate.value;
     Array.from(el.options).forEach(item => { item.selected = item === candidate; });
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    return { ok: true, id, value: candidate.value, label: candidate.textContent.trim() };
+    const observed = await observation;
+    const verified = el.value === candidate.value;
+    const status = verified ? 'verified' : 'failed';
+    const message = verified ? `The page selected “${candidate.textContent.trim()}”.` : 'The page did not keep the selected option.';
+    mark(id, verified ? 'verified' : 'failed', message, snapshotId);
+    return { ok: verified, status, id, value: candidate.value, label: candidate.textContent.trim(), observed, message, error: verified ? null : message };
   }
 
   async function trySubmitFallback(typedEl) {

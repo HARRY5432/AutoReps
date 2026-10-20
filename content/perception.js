@@ -8,6 +8,7 @@
   window.__autoRepPerceptionLoaded = true;
 
   const BADGE_CONTAINER_ID = '__autorep-badges';
+  const ACTION_MARKER_ID = '__autorep-action-marker';
   const SNAPSHOT_SCHEMA = 'autorep.page-intelligence.v1';
   const CONTROL_LIMIT = 250;
   const TEXT_PREVIEW_LIMIT = 3500;
@@ -18,6 +19,9 @@
   let lastSnapshot = null;
   let badgesVisible = false;
   let currentSnapshotId = null;
+  let ignoreObserverUntil = 0;
+  let markerTimer = null;
+  const outlineState = new WeakMap();
   const snapshotRegistry = new Map();
 
   const JUNK_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK', 'SVG', 'PATH', 'SOURCE']);
@@ -567,6 +571,7 @@
   }
 
   function renderBadges() {
+    ignoreObserverUntil = Date.now() + 1800;
     let container = document.getElementById(BADGE_CONTAINER_ID);
     if (!container) {
       container = document.createElement('div');
@@ -597,12 +602,65 @@
   }
 
   function clearBadges() {
+    ignoreObserverUntil = Date.now() + 1500;
     const c = document.getElementById(BADGE_CONTAINER_ID);
     if (c) c.remove();
     document.querySelectorAll('[data-autorep-outlined]').forEach(el => {
       el.style.outline = '';
       delete el.dataset.autorepOutlined;
     });
+  }
+
+  function clearActionMarker() {
+    ignoreObserverUntil = Date.now() + 1500;
+    const marker = document.getElementById(ACTION_MARKER_ID);
+    if (marker) marker.remove();
+    document.querySelectorAll('[data-autorep-action-outline]').forEach(el => {
+      const old = outlineState.get(el);
+      el.style.outline = old || '';
+      delete el.dataset.autorepActionOutline;
+      outlineState.delete(el);
+    });
+  }
+
+  function showActionMarker(id, status='acting', message='AutoRep is interacting here', snapshotId=null, scroll=true) {
+    if (snapshotId && snapshotId !== currentSnapshotId) {
+      return { ok: false, errorCode: 'STALE_SNAPSHOT', error: 'The page changed before the target could be highlighted.' };
+    }
+    const entry = snapshotRegistry.get(Number(id));
+    const el = entry?.element || (window.__autoRepRefs || {})[id];
+    if (!el?.isConnected) return { ok: false, errorCode: 'TARGET_NOT_FOUND', error: 'The target is not connected to the page.' };
+    ignoreObserverUntil = Date.now() + 1800;
+    if (scroll) {
+      try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch (e) { el.scrollIntoView(); }
+    }
+    clearActionMarker();
+    const marker = document.createElement('div');
+    marker.id = ACTION_MARKER_ID;
+    marker.textContent = message;
+    const colors = {
+      acting: ['#2563eb', '#dbeafe'],
+      verified: ['#15803d', '#dcfce7'],
+      warning: ['#b45309', '#fef3c7'],
+      failed: ['#b91c1c', '#fee2e2'],
+      focus: ['#7c3aed', '#ede9fe']
+    };
+    const [background, foreground] = colors[status] || colors.acting;
+    marker.style.cssText = `position:fixed;left:12px;top:12px;max-width:calc(100vw - 24px);z-index:2147483647;pointer-events:none;` +
+      `background:${background};color:${foreground};font:700 12px/1.3 system-ui;padding:8px 12px;border-radius:999px;` +
+      `box-shadow:0 5px 18px rgba(0,0,0,.32);`;
+    (document.body || document.documentElement).appendChild(marker);
+    const oldOutline = el.style.outline;
+    outlineState.set(el, oldOutline);
+    el.style.outline = `3px solid ${background}`;
+    el.dataset.autorepActionOutline = '1';
+    if (markerTimer) clearTimeout(markerTimer);
+    markerTimer = setTimeout(clearActionMarker, 2800);
+    return { ok: true, id, message };
+  }
+
+  function focusElement(id, snapshotId) {
+    return showActionMarker(id, 'focus', 'AutoRep target', snapshotId, true);
   }
 
   function toggleBadges(show) {
@@ -622,7 +680,17 @@
 
   // auto re-scan on SPA navigation / dynamic content (debounced)
   let debounce = null;
-  const observer = new MutationObserver(() => {
+  const isAutoRepOwnedNode = node => {
+    let current = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    while (current) {
+      if (current.id === BADGE_CONTAINER_ID || current.id === ACTION_MARKER_ID || current.dataset?.autorepActionOutline) return true;
+      current = current.parentElement || current.getRootNode?.().host || null;
+    }
+    return false;
+  };
+  const observer = new MutationObserver(mutations => {
+    if (Date.now() < ignoreObserverUntil) return;
+    if (mutations.length && mutations.every(mutation => isAutoRepOwnedNode(mutation.target))) return;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {
       if (badgesVisible && lastSnapshot) { scanV2(); }
@@ -637,6 +705,8 @@
     understand: () => scanV2().page,
     toggleBadges,
     clearBadges,
+    focusElement,
+    showActionMarker,
     saveSnapshot,
     getLast: () => lastSnapshot,
     getSnapshotId: () => currentSnapshotId,
@@ -646,7 +716,7 @@
 
   // listen for messages from sidepanel
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
-    const handled = ['AUTOREP_SCAN', 'AUTOREP_UNDERSTAND', 'AUTOREP_TOGGLE_BADGES', 'AUTOREP_SAVE'].includes(msg.type);
+    const handled = ['AUTOREP_SCAN', 'AUTOREP_UNDERSTAND', 'AUTOREP_TOGGLE_BADGES', 'AUTOREP_SAVE', 'AUTOREP_FOCUS'].includes(msg.type);
     if (!handled) return false;
     if (msg.type === 'AUTOREP_SCAN') sendResponse({ ok: true, snapshot: scanV2() });
     if (msg.type === 'AUTOREP_UNDERSTAND') {
@@ -655,6 +725,7 @@
     }
     if (msg.type === 'AUTOREP_TOGGLE_BADGES') sendResponse({ ok: true, visible: toggleBadges(msg.show) });
     if (msg.type === 'AUTOREP_SAVE') sendResponse({ ok: true, ...saveSnapshot() });
+    if (msg.type === 'AUTOREP_FOCUS') sendResponse(showActionMarker(msg.id, msg.kind || 'focus', msg.message || 'AutoRep target', msg.snapshotId, true));
     return true;
   });
 
